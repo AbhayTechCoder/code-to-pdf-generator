@@ -16,6 +16,4 @@ Open terminal/command prompt and run:
 ```bash
 npm install puppeteer-core
 
-Step 4: Generate PDF
-
 node pdf-generator.js
