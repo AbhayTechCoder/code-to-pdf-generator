@@ -2,180 +2,177 @@ const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer-core");
 
-// ✅ Chrome Path
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-
-// ✅ Single PDF output
-const OUTPUT_PDF = "COMPLETE_PROJECT_CODE.pdf";
+// ✅ Cross-platform Chrome path detection
+const getChromePath = () => {
+    const platforms = {
+        win32: [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe"
+        ],
+        darwin: [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium"
+        ],
+        linux: [
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium"
+        ]
+    };
+    
+    const osPaths = platforms[process.platform] || [];
+    for (const chromePath of osPaths) {
+        if (fs.existsSync(chromePath)) return chromePath;
+    }
+    return null;
+};
 
 // ✅ Configuration
 const CONFIG = {
-    timeout: 300000, // 5 minutes timeout
-    maxConcurrent: 1,
-    retryCount: 3,
-    chunkSize: 10
+    timeout: 300000,
+    maxFileSizeMB: 5, // Increased to 5MB
+    excludedDirs: new Set([
+        'node_modules', '.git', 'dist', 'build', '.next', 'coverage',
+        '.cache', '.vscode', '.idea', '__pycache__', 'venv', 'env',
+        'target', 'out', 'tmp', 'temp', 'logs', 'uploads', 'backup'
+    ]),
+    excludedExtensions: new Set([
+        '.lock', '.log', '.tmp', '.swp', '.map', 
+        '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.woff', '.woff2',
+        '.ttf', '.eot', '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll'
+    ]),
+    includedExtensions: new Set([
+        // Web
+        '.js', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css', '.scss', '.sass', '.less',
+        '.vue', '.svelte', '.astro',
+        // Backend
+        '.py', '.java', '.go', '.rb', '.php', '.cs', '.cpp', '.c', '.h',
+        '.json', '.xml', '.yaml', '.yml', '.toml',
+        // Config
+        '.env', '.example', '.md', '.txt', '.sh', '.bat', '.ps1',
+        '.sql', '.graphql', '.proto'
+    ])
 };
 
-// ✅ Sections in correct order
+// ✅ Sections with better categorization
 const SECTIONS = [
     {
         name: "frontend",
         title: "📱 FRONTEND / CLIENT SIDE CODE",
         icon: "🎨",
-        color: "#4CAF50",
-        folders: ["client", "frontend", "public", "src", "views", "static", "assets", "ui", "components"],
-        extensions: [".js", ".jsx", ".html", ".css", ".vue", ".ts", ".tsx", ".scss", ".sass"]
-    },
-    {
-        name: "middleware",
-        title: "⚙️ MIDDLEWARE & CONTROLLER CODE",
-        icon: "🔧",
-        color: "#FF9800",
-        folders: ["middleware", "controllers", "routes", "api", "handlers", "controller"],
-        extensions: [".js", ".ts"]
+        keywords: ["client", "frontend", "public", "src", "views", "static", "ui", "components", "pages", "layouts", "styles", "assets"],
+        extensions: [".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte"]
     },
     {
         name: "backend",
         title: "🗄️ BACKEND / SERVER CODE",
         icon: "🚀",
-        color: "#2196F3",
-        folders: ["backend", "server", "models", "config", "database", "db", "services", "utils", "helpers", "lib", "core"],
-        extensions: [".js", ".ts", ".py", ".java"]
+        keywords: ["backend", "server", "api", "models", "controllers", "routes", "services", "utils", "helpers", "lib", "core", "config", "database", "db", "migrations", "seeders"],
+        extensions: [".js", ".ts", ".py", ".java", ".go", ".rb", ".php", ".cs", ".sql"]
+    },
+    {
+        name: "config",
+        title: "⚙️ CONFIGURATION & SETUP FILES",
+        icon: "🔧",
+        keywords: ["config", "setup", "install", "docker", "deploy", "scripts", "bin", "tools"],
+        extensions: [".json", ".yaml", ".yml", ".toml", ".env", ".sh", ".bat", ".ps1", ".md"]
+    },
+    {
+        name: "root",
+        title: "📄 ROOT DIRECTORY FILES",
+        icon: "📁",
+        keywords: [], // This will catch root level files
+        extensions: [".js", ".json", ".md", ".txt", ".env", ".yml", ".yaml"]
     }
 ];
 
-let sectionsData = {
-    frontend: [],
-    middleware: [],
-    backend: []
-};
+let sectionsData = { frontend: [], backend: [], config: [], root: [] };
+let processedStats = { total: 0, succeeded: 0, failed: 0, skipped: 0, totalSize: 0, totalFilesFound: 0 };
 
-let processedCount = 0;
-let totalFilesToProcess = 0;
-
-// HTML escaping (no boxes)
 function escapeHtml(text) {
     if (!text) return '';
-    return text
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;")
-        .replace(/\\/g, "&#92;")
-        .replace(/\t/g, "    ");
+    const htmlEscapes = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    };
+    return text.replace(/[&<>"']/g, char => htmlEscapes[char]);
 }
 
-// Colorizer
-function colorizeCode(code) {
-    let result = code;
+function highlightCode(code) {
+    let result = escapeHtml(code);
     
-    // Comments
-    result = result.replace(/(\/\/[^\n]*)/g, '<span class="comment">$1</span>');
-    result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="comment">$1</span>');
+    const highlights = [
+        { pattern: /(\/\/[^\n]*)/g, className: 'comment' },
+        { pattern: /(\/\*[\s\S]*?\*\/)/g, className: 'comment' },
+        { pattern: /("(?:[^"\\]|\\.)*")/g, className: 'string' },
+        { pattern: /('(?:[^'\\]|\\.)*')/g, className: 'string' },
+        { pattern: /(`(?:[^`\\]|\\.)*`)/g, className: 'string' },
+        { pattern: /\b(const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|this|class|extends|super|import|export|default|from|async|await|typeof|instanceof|in|of|delete|void|yield|static|get|set|require|module|exports|def|class|import|as|from|public|private|static|void|int|float|string|boolean)\b/g, className: 'keyword' },
+        { pattern: /\b(\d+\.?\d*|0x[\da-fA-F]+)\b/g, className: 'number' },
+        { pattern: /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g, className: 'function', captureGroup: 1 }
+    ];
     
-    // Strings
-    result = result.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, '<span class="string">"$1"</span>');
-    result = result.replace(/'([^'\\]*(\\.[^'\\]*)*)'/g, '<span class="string">\'$1\'</span>');
-    result = result.replace(/`([^`\\]*(\\.[^`\\]*)*)`/g, '<span class="string">`$1`</span>');
-    
-    // Keywords
-    const keywords = /\b(const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|this|class|extends|super|import|export|default|from|async|await|typeof|instanceof|in|of|delete|void|yield|static|get|set|require|module|exports)\b/g;
-    result = result.replace(keywords, '<span class="keyword">$1</span>');
-    
-    // Numbers
-    result = result.replace(/\b(\d+\.?\d*|0x[\da-fA-F]+)\b/g, '<span class="number">$1</span>');
-    
-    // Functions
-    result = result.replace(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g, '<span class="function">$1</span>(');
+    for (const highlight of highlights) {
+        if (highlight.captureGroup) {
+            result = result.replace(highlight.pattern, (match, capture) => 
+                `<span class="${highlight.className}">${capture}</span>(`);
+        } else {
+            result = result.replace(highlight.pattern, `<span class="${highlight.className}">$1</span>`);
+        }
+    }
     
     return result;
 }
 
-// Add line numbers
 function addLineNumbers(code) {
     const lines = code.split('\n');
-    let lineNumbersHtml = '<div class="line-numbers">';
-    let codeHtml = '<pre><code>';
-    
-    for (let i = 0; i < lines.length; i++) {
-        lineNumbersHtml += `<span>${i + 1}</span>`;
-        codeHtml += `${lines[i]}${i < lines.length - 1 ? '\n' : ''}`;
-    }
-    
-    lineNumbersHtml += '</div>';
-    codeHtml += '</code></pre>';
+    const lineNumbers = lines.map((_, i) => `<span>${i + 1}</span>`).join('');
+    const codeContent = lines.join('\n');
     
     return `
-        <div class="code-wrapper" style="overflow: auto; min-height: 100px;">
-            ${lineNumbersHtml}
-            <div class="code-content" style="margin-left: 55px; overflow-x: auto;">
-                ${codeHtml}
-            </div>
+        <div class="code-wrapper">
+            <div class="line-numbers">${lineNumbers}</div>
+            <div class="code-content"><pre><code>${codeContent}</code></pre></div>
             <div style="clear: both;"></div>
         </div>
     `;
 }
 
-// Categorize file
-function categorizeFile(filePath) {
-    const lowerPath = filePath.toLowerCase();
+// ✅ Improved scanning that captures ALL files
+function scanDirectory(dir, depth = 0, maxDepth = 15) {
+    if (depth > maxDepth) return;
     
-    for (const folder of SECTIONS[0].folders) {
-        if (lowerPath.includes(folder.toLowerCase())) {
-            return 'frontend';
-        }
-    }
-    
-    for (const folder of SECTIONS[1].folders) {
-        if (lowerPath.includes(folder.toLowerCase())) {
-            return 'middleware';
-        }
-    }
-    
-    for (const folder of SECTIONS[2].folders) {
-        if (lowerPath.includes(folder.toLowerCase())) {
-            return 'backend';
-        }
-    }
-    
-    return null;
-}
-
-// Scan directory
-function scanDirectory(dir) {
     try {
-        const files = fs.readdirSync(dir);
+        const items = fs.readdirSync(dir);
         
-        for (const file of files) {
-            if (file === "node_modules" || file === ".git" || file === "dist" || 
-                file === "build" || file === ".next" || file === "coverage") {
-                continue;
-            }
+        for (const item of items) {
+            if (CONFIG.excludedDirs.has(item)) continue;
             
-            const fullPath = path.join(dir, file);
+            const fullPath = path.join(dir, item);
             
             try {
                 const stat = fs.statSync(fullPath);
                 
                 if (stat.isDirectory()) {
-                    scanDirectory(fullPath);
+                    scanDirectory(fullPath, depth + 1, maxDepth);
                 } else {
-                    let shouldInclude = false;
-                    let fileExt = path.extname(file).toLowerCase();
+                    const ext = path.extname(item).toLowerCase();
                     
-                    for (const section of SECTIONS) {
-                        if (section.extensions.includes(fileExt)) {
-                            shouldInclude = true;
-                            break;
-                        }
-                    }
-                    
-                    if (shouldInclude) {
+                    // Check if file should be included
+                    if (CONFIG.includedExtensions.has(ext) && 
+                        !CONFIG.excludedExtensions.has(ext) &&
+                        stat.size <= CONFIG.maxFileSizeMB * 1024 * 1024) {
+                        
+                        processedStats.totalFilesFound++;
                         const category = categorizeFile(fullPath);
-                        if (category && sectionsData[category]) {
-                            sectionsData[category].push(fullPath);
-                        }
+                        sectionsData[category].push(fullPath);
+                    } else if (stat.size > CONFIG.maxFileSizeMB * 1024 * 1024) {
+                        console.log(`   ⚠️ Skipping large file: ${item} (${(stat.size/1024/1024).toFixed(2)} MB)`);
+                        processedStats.skipped++;
                     }
                 }
             } catch (err) {
@@ -187,22 +184,69 @@ function scanDirectory(dir) {
     }
 }
 
-// Process file
+// ✅ Improved categorization
+function categorizeFile(filePath) {
+    const lowerPath = filePath.toLowerCase();
+    const pathParts = lowerPath.split(path.sep);
+    const isRootFile = pathParts.length === 1; // File in root directory
+    
+    // Check for frontend
+    for (const keyword of SECTIONS[0].keywords) {
+        if (lowerPath.includes(keyword)) {
+            return 'frontend';
+        }
+    }
+    
+    // Check for backend
+    for (const keyword of SECTIONS[1].keywords) {
+        if (lowerPath.includes(keyword)) {
+            return 'backend';
+        }
+    }
+    
+    // Check for config
+    for (const keyword of SECTIONS[2].keywords) {
+        if (lowerPath.includes(keyword)) {
+            return 'config';
+        }
+    }
+    
+    // Root level files
+    if (isRootFile || pathParts.length === 2) {
+        return 'root';
+    }
+    
+    // Default to backend for server-side code
+    const ext = path.extname(filePath).toLowerCase();
+    if (['.js', '.ts', '.py', '.java', '.go', '.rb', '.php'].includes(ext)) {
+        return 'backend';
+    }
+    
+    return 'root';
+}
+
 function processFile(filePath) {
     try {
         let code = fs.readFileSync(filePath, "utf-8");
+        
         if (!code || code.trim().length === 0) {
             return null;
         }
         
-        if (code.length > 10 * 1024 * 1024) {
-            console.log(`   ⚠️ Skipping large file: ${path.basename(filePath)} (${(code.length/1024/1024).toFixed(2)} MB)`);
-            return null;
+        // Truncate if too large
+        const maxChars = 1000000; // 1MB per file max
+        let wasTruncated = false;
+        if (code.length > maxChars) {
+            code = code.substring(0, maxChars);
+            wasTruncated = true;
         }
         
-        let escapedCode = escapeHtml(code);
-        let coloredCode = colorizeCode(escapedCode);
-        let finalCode = addLineNumbers(coloredCode);
+        const highlightedCode = highlightCode(code);
+        let finalCode = addLineNumbers(highlightedCode);
+        
+        if (wasTruncated) {
+            finalCode += '\n<!-- FILE TRUNCATED DUE TO SIZE -->';
+        }
         
         return {
             success: true,
@@ -210,12 +254,11 @@ function processFile(filePath) {
             size: code.length
         };
     } catch (err) {
-        console.log(`   ❌ Error reading: ${path.basename(filePath)} - ${err.message}`);
         return null;
     }
 }
 
-// Generate complete HTML
+// ✅ Generate complete HTML
 function generateCompleteHTML() {
     let html = `<!DOCTYPE html>
 <html>
@@ -223,17 +266,8 @@ function generateCompleteHTML() {
 <meta charset="UTF-8">
 <title>Complete Project Source Code</title>
 <style>
-    * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-    }
-    
-    body {
-        background: #ffffff;
-        font-family: 'Consolas', 'Courier New', monospace;
-        padding: 20px;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f5f5f5; font-family: 'Consolas', 'Courier New', monospace; padding: 20px; }
     
     .cover-page {
         page-break-after: always;
@@ -244,47 +278,26 @@ function generateCompleteHTML() {
         border-radius: 10px;
         margin-bottom: 30px;
     }
-    
-    .cover-page h1 {
-        font-size: 48px;
-        margin-bottom: 20px;
-    }
-    
-    .cover-page .stats {
-        margin-top: 60px;
-        font-size: 18px;
-    }
+    .cover-page h1 { font-size: 48px; margin-bottom: 20px; }
+    .cover-page .stats { margin-top: 60px; font-size: 18px; }
+    .cover-page .stats p { margin: 10px 0; }
     
     .toc {
         page-break-after: always;
         padding: 40px;
-        background: #f8f9fa;
+        background: white;
         border-radius: 10px;
         margin-bottom: 30px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
     }
-    
-    .toc h2 {
-        color: #333;
-        margin-bottom: 30px;
-        font-size: 32px;
-        border-bottom: 3px solid #667eea;
-        display: inline-block;
-        padding-bottom: 10px;
-    }
-    
-    .toc ul {
-        list-style: none;
-        margin-top: 30px;
-    }
-    
-    .toc li {
-        margin: 15px 0;
-        font-size: 16px;
-    }
+    .toc h2 { color: #333; margin-bottom: 30px; font-size: 32px; border-bottom: 3px solid #667eea; display: inline-block; padding-bottom: 10px; }
+    .toc ul { list-style: none; margin-top: 30px; }
+    .toc li { margin: 15px 0; font-size: 16px; padding: 5px 0; border-bottom: 1px solid #eee; }
+    .toc a { text-decoration: none; color: #667eea; }
+    .toc a:hover { text-decoration: underline; }
     
     .section-header {
         page-break-before: always;
-        page-break-after: avoid;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         padding: 40px;
@@ -292,49 +305,38 @@ function generateCompleteHTML() {
         border-radius: 10px;
         margin: 30px 0;
     }
-    
-    .section-header h1 {
-        font-size: 36px;
-        margin-bottom: 10px;
-    }
+    .section-header h1 { font-size: 36px; margin-bottom: 10px; }
+    .section-header .file-count { font-size: 18px; margin-top: 10px; opacity: 0.9; }
     
     .file-card {
-        page-break-before: always;
-        background: #ffffff;
-        margin-bottom: 20px;
+        page-break-inside: avoid;
+        background: white;
+        margin-bottom: 30px;
         border: 1px solid #e0e0e0;
         border-radius: 8px;
         overflow: hidden;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    
-    .file-card:first-child {
-        page-break-before: avoid;
-    }
-    
     .file-header {
         background: #f8f9fa;
-        padding: 12px 20px;
-        border-bottom: 2px solid #667eea;
+        padding: 15px 20px;
+        border-bottom: 3px solid #667eea;
     }
-    
     .file-header h2 {
         color: #333;
         font-size: 14px;
         font-weight: 600;
         word-break: break-all;
     }
-    
-    .file-header h2::before {
-        content: "📄 ";
-    }
+    .file-header h2::before { content: "📄 "; }
     
     .code-wrapper {
         padding: 20px;
-        background: #ffffff;
+        background: white;
         min-height: 200px;
+        overflow: auto;
+        position: relative;
     }
-    
     .line-numbers {
         float: left;
         text-align: right;
@@ -347,17 +349,10 @@ function generateCompleteHTML() {
         margin-right: 15px;
         font-family: 'Consolas', monospace;
     }
-    
-    .line-numbers span {
-        display: block;
-    }
-    
-    .code-content {
-        overflow-x: auto;
-    }
-    
+    .line-numbers span { display: block; }
+    .code-content { overflow-x: auto; }
     pre {
-        background: #ffffff;
+        background: white;
         color: #333;
         font-family: 'Consolas', monospace;
         font-size: 12px;
@@ -366,10 +361,7 @@ function generateCompleteHTML() {
         white-space: pre-wrap;
         word-wrap: break-word;
     }
-    
-    code {
-        font-family: 'Consolas', monospace;
-    }
+    code { font-family: 'Consolas', monospace; }
     
     .keyword { color: #0000ff; font-weight: bold; }
     .string { color: #a31515; }
@@ -382,48 +374,45 @@ function generateCompleteHTML() {
         padding: 30px;
         background: #f8f9fa;
         color: #666;
-        font-size: 11px;
+        font-size: 12px;
         page-break-before: always;
         margin-top: 30px;
         border-radius: 8px;
     }
     
     @media print {
-        body {
-            background: white;
-        }
-        .file-card {
-            page-break-inside: avoid;
-        }
-        .cover-page, .section-header {
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-        }
+        body { background: white; padding: 0; }
+        .file-card { page-break-inside: avoid; }
+        .cover-page, .section-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     }
 </style>
 </head>
 <body>
 `;
     
-    const totalFiles = sectionsData.frontend.length + sectionsData.middleware.length + sectionsData.backend.length;
+    const totalFiles = sectionsData.frontend.length + sectionsData.backend.length + sectionsData.config.length + sectionsData.root.length;
+    
     html += `
 <div class="cover-page">
     <h1>📚 COMPLETE PROJECT SOURCE CODE</h1>
-    <h2>Technical Documentation</h2>
+    <h2>Complete Documentation</h2>
     <div class="stats">
         <p>📊 Total Files: ${totalFiles}</p>
         <p>🎨 Frontend: ${sectionsData.frontend.length} files</p>
-        <p>⚙️ Middleware: ${sectionsData.middleware.length} files</p>
         <p>🚀 Backend: ${sectionsData.backend.length} files</p>
+        <p>⚙️ Config: ${sectionsData.config.length} files</p>
+        <p>📁 Root: ${sectionsData.root.length} files</p>
         <p>📅 Generated: ${new Date().toLocaleString()}</p>
     </div>
 </div>
+
 <div class="toc">
     <h2>📑 Table of Contents</h2>
     <ul>
-        <li>📱 <strong>SECTION 1: FRONTEND</strong> - ${sectionsData.frontend.length} files</li>
-        <li>⚙️ <strong>SECTION 2: MIDDLEWARE</strong> - ${sectionsData.middleware.length} files</li>
-        <li>🚀 <strong>SECTION 3: BACKEND</strong> - ${sectionsData.backend.length} files</li>
+        <li>🎨 <strong>SECTION 1: FRONTEND</strong> - ${sectionsData.frontend.length} files</li>
+        <li>🚀 <strong>SECTION 2: BACKEND</strong> - ${sectionsData.backend.length} files</li>
+        <li>⚙️ <strong>SECTION 3: CONFIGURATION</strong> - ${sectionsData.config.length} files</li>
+        <li>📁 <strong>SECTION 4: ROOT FILES</strong> - ${sectionsData.root.length} files</li>
     </ul>
 </div>
 `;
@@ -431,114 +420,155 @@ function generateCompleteHTML() {
     return { html, totalFiles };
 }
 
-// ==================== MAIN EXECUTION ====================
-console.log("🚀 COMPLETE PROJECT CODE TO SINGLE PDF\n");
-console.log("=" .repeat(60));
-console.log("📂 Scanning project directory...\n");
-
-scanDirectory("./");
-
-console.log("\n📊 SCAN RESULTS:");
-console.log(`   🎨 Frontend files: ${sectionsData.frontend.length}`);
-console.log(`   ⚙️ Middleware files: ${sectionsData.middleware.length}`);
-console.log(`   🗄️ Backend files: ${sectionsData.backend.length}`);
-
-const totalFiles = sectionsData.frontend.length + sectionsData.middleware.length + sectionsData.backend.length;
-
-if (totalFiles === 0) {
-    console.log("\n❌ No code files found!");
-    process.exit(1);
-}
-
-console.log(`\n📊 Total files found: ${totalFiles}`);
-console.log("\n🎨 Processing files and generating HTML...\n");
-
-const { html: initialHTML } = generateCompleteHTML();
-let finalHTML = initialHTML;
-let processedFileCount = 0;
-let totalCodeSize = 0;
-
-for (const section of SECTIONS) {
-    const files = sectionsData[section.name];
+// Main execution
+async function main() {
+    console.log("=" .repeat(70));
+    console.log("🚀 COMPLETE PROJECT CODE TO PDF - ENHANCED VERSION");
+    console.log("=" .repeat(70));
     
-    if (files.length === 0) continue;
+    // Check Chrome
+    const chromePath = getChromePath();
+    if (!chromePath) {
+        console.error("\n❌ Chrome not found! Please install Google Chrome.");
+        console.log("💡 Download from: https://www.google.com/chrome/");
+        process.exit(1);
+    }
+    console.log(`\n✅ Chrome found: ${chromePath}`);
     
-    console.log(`\n📁 Processing ${section.name.toUpperCase()} section (${files.length} files)...`);
+    // Scan directory
+    console.log("\n📂 Scanning project directory...");
+    console.log(`📍 Path: ${process.cwd()}\n`);
+    scanDirectory("./");
     
-    finalHTML += `
+    const totalFiles = sectionsData.frontend.length + sectionsData.backend.length + 
+                      sectionsData.config.length + sectionsData.root.length;
+    
+    if (totalFiles === 0) {
+        console.log("\n❌ No code files found!");
+        console.log("💡 Make sure you're in the correct project directory");
+        console.log(`💡 Current directory: ${process.cwd()}`);
+        process.exit(1);
+    }
+    
+    console.log("\n📊 SCAN RESULTS:");
+    console.log(`   🎨 Frontend files: ${sectionsData.frontend.length}`);
+    console.log(`   🚀 Backend files: ${sectionsData.backend.length}`);
+    console.log(`   ⚙️ Config files: ${sectionsData.config.length}`);
+    console.log(`   📁 Root files: ${sectionsData.root.length}`);
+    console.log(`   📦 TOTAL: ${totalFiles} files found\n`);
+    
+    // Generate HTML
+    console.log("🎨 Generating HTML and processing files...\n");
+    const { html: initialHTML, totalFiles: total } = generateCompleteHTML();
+    let finalHTML = initialHTML;
+    let processedCount = 0;
+    let totalCodeSize = 0;
+    
+    // Process each section
+    for (const section of SECTIONS) {
+        const files = sectionsData[section.name];
+        if (files.length === 0) continue;
+        
+        console.log(`📁 Processing ${section.name.toUpperCase()} section (${files.length} files)...`);
+        
+        finalHTML += `
 <div class="section-header">
     <div class="icon">${section.icon}</div>
     <h1>${section.title}</h1>
     <div class="file-count">📁 Total Files: ${files.length}</div>
 </div>
 `;
-    
-    for (let i = 0; i < files.length; i++) {
-        const filePath = files[i];
-        const fileName = path.basename(filePath);
         
-        process.stdout.write(`   Processing [${i+1}/${files.length}]: ${fileName} ... `);
-        
-        const result = processFile(filePath);
-        
-        if (result && result.success) {
-            finalHTML += `
+        for (let i = 0; i < files.length; i++) {
+            const filePath = files[i];
+            const fileName = path.basename(filePath);
+            
+            process.stdout.write(`   [${i+1}/${files.length}] ${fileName} ... `);
+            
+            const result = processFile(filePath);
+            
+            if (result && result.success) {
+                const relativePath = path.relative(process.cwd(), filePath);
+                finalHTML += `
 <div class="file-card">
     <div class="file-header">
-        <h2>${escapeHtml(filePath)}</h2>
+        <h2>${escapeHtml(relativePath)}</h2>
     </div>
     ${result.content}
 </div>
 `;
-            processedFileCount++;
-            totalCodeSize += result.size;
-            console.log(`✅ (${(result.size/1024).toFixed(1)} KB)`);
-        } else {
-            console.log(`⚠️ Skipped`);
+                processedCount++;
+                totalCodeSize += result.size;
+                console.log(`✅ (${(result.size/1024).toFixed(1)} KB)`);
+            } else {
+                console.log(`⚠️ Skipped`);
+                processedStats.failed++;
+            }
         }
+        console.log();
     }
-}
-
-finalHTML += `
+    
+    finalHTML += `
 <div class="footer">
-    <p><strong>📊 Total Files Processed: ${processedFileCount}/${totalFiles}</strong></p>
+    <p><strong>📊 Total Files Processed: ${processedCount}/${totalFiles}</strong></p>
     <p>📦 Total Code Size: ${(totalCodeSize/1024/1024).toFixed(2)} MB</p>
     <p>🔧 Generated on: ${new Date().toLocaleString()}</p>
     <p>📝 Complete Project Source Code Documentation</p>
 </div>
 </body>
 </html>`;
-
-console.log("\n" + "=" .repeat(60));
-console.log(`\n✅ HTML generated! Processed ${processedFileCount} files`);
-console.log("\n🚀 Generating PDF...");
-
-(async () => {
-    let browser = null;
     
+    console.log("=" .repeat(70));
+    console.log(`\n✅ HTML generated! Processed ${processedCount} files`);
+    console.log(`📦 HTML size: ${(Buffer.byteLength(finalHTML, 'utf8') / 1024 / 1024).toFixed(2)} MB`);
+    
+    // Generate PDF
+    console.log("\n🚀 Generating PDF... (this may take a moment)");
+    
+    let browser = null;
     try {
         browser = await puppeteer.launch({
-            executablePath: CHROME_PATH,
+            executablePath: chromePath,
             headless: "new",
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         });
         
         const page = await browser.newPage();
         page.setDefaultTimeout(CONFIG.timeout);
-        
         await page.setViewport({ width: 1200, height: 800 });
         await page.setContent(finalHTML, { waitUntil: 'networkidle0', timeout: CONFIG.timeout });
-        await page.pdf({ path: OUTPUT_PDF, format: "A4", printBackground: true, margin: { top: "15mm", bottom: "15mm", left: "12mm", right: "12mm" } });
+        
+        const outputFile = "COMPLETE_PROJECT_CODE.pdf";
+        await page.pdf({ 
+            path: outputFile, 
+            format: "A4", 
+            printBackground: true, 
+            margin: { top: "15mm", bottom: "15mm", left: "12mm", right: "12mm" } 
+        });
         
         await browser.close();
         
+        const pdfStats = fs.statSync(outputFile);
         console.log("\n✅ PDF GENERATION COMPLETE!");
-        console.log(`📁 Output: ${OUTPUT_PDF}`);
-        console.log(`📍 Location: ${path.resolve(OUTPUT_PDF)}`);
-        console.log(`📊 Total Files: ${processedFileCount}/${totalFiles}`);
+        console.log(`📁 Output: ${outputFile}`);
+        console.log(`📍 Location: ${path.resolve(outputFile)}`);
+        console.log(`📦 PDF Size: ${(pdfStats.size / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`\n📊 Final Statistics:`);
+        console.log(`   ✅ Successfully processed: ${processedCount} files`);
+        console.log(`   ❌ Failed/Skipped: ${processedStats.failed} files`);
+        console.log(`   📦 Total code size: ${(totalCodeSize/1024/1024).toFixed(2)} MB`);
         
     } catch (error) {
-        console.error("\n❌ Error:", error.message);
+        console.error("\n❌ Error generating PDF:", error.message);
         if (browser) await browser.close();
     }
-})();
+}
+
+// Run the script
+if (global.gc) {
+    console.log("✅ Garbage collection enabled\n");
+} else {
+    console.log("⚠️ Run with --expose-gc for better memory management\n");
+}
+
+main().catch(console.error);
