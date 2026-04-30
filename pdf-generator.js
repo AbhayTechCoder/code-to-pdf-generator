@@ -31,7 +31,7 @@ const getChromePath = () => {
 // ✅ Configuration
 const CONFIG = {
     timeout: 300000,
-    maxFileSizeMB: 5, // Increased to 5MB
+    maxFileSizeMB: 5,
     excludedDirs: new Set([
         'node_modules', '.git', 'dist', 'build', '.next', 'coverage',
         '.cache', '.vscode', '.idea', '__pycache__', 'venv', 'env',
@@ -43,15 +43,10 @@ const CONFIG = {
         '.ttf', '.eot', '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll'
     ]),
     includedExtensions: new Set([
-        // Web
         '.js', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css', '.scss', '.sass', '.less',
-        '.vue', '.svelte', '.astro',
-        // Backend
-        '.py', '.java', '.go', '.rb', '.php', '.cs', '.cpp', '.c', '.h',
-        '.json', '.xml', '.yaml', '.yml', '.toml',
-        // Config
-        '.env', '.example', '.md', '.txt', '.sh', '.bat', '.ps1',
-        '.sql', '.graphql', '.proto'
+        '.vue', '.svelte', '.astro', '.py', '.java', '.go', '.rb', '.php', '.cs', '.cpp', '.c', '.h',
+        '.json', '.xml', '.yaml', '.yml', '.toml', '.env', '.example', '.md', '.txt', 
+        '.sh', '.bat', '.ps1', '.sql', '.graphql', '.proto'
     ])
 };
 
@@ -82,13 +77,14 @@ const SECTIONS = [
         name: "root",
         title: "📄 ROOT DIRECTORY FILES",
         icon: "📁",
-        keywords: [], // This will catch root level files
+        keywords: [],
         extensions: [".js", ".json", ".md", ".txt", ".env", ".yml", ".yaml"]
     }
 ];
 
 let sectionsData = { frontend: [], backend: [], config: [], root: [] };
 let processedStats = { total: 0, succeeded: 0, failed: 0, skipped: 0, totalSize: 0, totalFilesFound: 0 };
+let filePageMapping = []; // Store which file appears on which page
 
 function escapeHtml(text) {
     if (!text) return '';
@@ -142,7 +138,36 @@ function addLineNumbers(code) {
     `;
 }
 
-// ✅ Improved scanning that captures ALL files
+// Extract functions/classes from code for reference
+function extractReferences(code, filePath) {
+    const references = [];
+    const fileName = path.basename(filePath);
+    
+    // Extract function names (JavaScript/TypeScript)
+    const funcRegex = /function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(|const\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*\([^)]*\)\s*=>|([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\([^)]*\)\s*\{/g;
+    let match;
+    while ((match = funcRegex.exec(code)) !== null) {
+        const funcName = match[1] || match[2] || match[3];
+        if (funcName && !funcName.match(/^(if|else|for|while|switch|try|catch)$/)) {
+            references.push({ type: 'function', name: funcName, file: fileName });
+        }
+    }
+    
+    // Extract class names
+    const classRegex = /class\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/g;
+    while ((match = classRegex.exec(code)) !== null) {
+        references.push({ type: 'class', name: match[1], file: fileName });
+    }
+    
+    // Extract exports
+    const exportRegex = /export\s+(?:default\s+)?(?:function|class|const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/g;
+    while ((match = exportRegex.exec(code)) !== null) {
+        references.push({ type: 'export', name: match[1], file: fileName });
+    }
+    
+    return references;
+}
+
 function scanDirectory(dir, depth = 0, maxDepth = 15) {
     if (depth > maxDepth) return;
     
@@ -162,7 +187,6 @@ function scanDirectory(dir, depth = 0, maxDepth = 15) {
                 } else {
                     const ext = path.extname(item).toLowerCase();
                     
-                    // Check if file should be included
                     if (CONFIG.includedExtensions.has(ext) && 
                         !CONFIG.excludedExtensions.has(ext) &&
                         stat.size <= CONFIG.maxFileSizeMB * 1024 * 1024) {
@@ -171,7 +195,6 @@ function scanDirectory(dir, depth = 0, maxDepth = 15) {
                         const category = categorizeFile(fullPath);
                         sectionsData[category].push(fullPath);
                     } else if (stat.size > CONFIG.maxFileSizeMB * 1024 * 1024) {
-                        console.log(`   ⚠️ Skipping large file: ${item} (${(stat.size/1024/1024).toFixed(2)} MB)`);
                         processedStats.skipped++;
                     }
                 }
@@ -184,39 +207,33 @@ function scanDirectory(dir, depth = 0, maxDepth = 15) {
     }
 }
 
-// ✅ Improved categorization
 function categorizeFile(filePath) {
     const lowerPath = filePath.toLowerCase();
     const pathParts = lowerPath.split(path.sep);
-    const isRootFile = pathParts.length === 1; // File in root directory
+    const isRootFile = pathParts.length === 1;
     
-    // Check for frontend
     for (const keyword of SECTIONS[0].keywords) {
         if (lowerPath.includes(keyword)) {
             return 'frontend';
         }
     }
     
-    // Check for backend
     for (const keyword of SECTIONS[1].keywords) {
         if (lowerPath.includes(keyword)) {
             return 'backend';
         }
     }
     
-    // Check for config
     for (const keyword of SECTIONS[2].keywords) {
         if (lowerPath.includes(keyword)) {
             return 'config';
         }
     }
     
-    // Root level files
     if (isRootFile || pathParts.length === 2) {
         return 'root';
     }
     
-    // Default to backend for server-side code
     const ext = path.extname(filePath).toLowerCase();
     if (['.js', '.ts', '.py', '.java', '.go', '.rb', '.php'].includes(ext)) {
         return 'backend';
@@ -233,14 +250,14 @@ function processFile(filePath) {
             return null;
         }
         
-        // Truncate if too large
-        const maxChars = 1000000; // 1MB per file max
+        const maxChars = 1000000;
         let wasTruncated = false;
         if (code.length > maxChars) {
             code = code.substring(0, maxChars);
             wasTruncated = true;
         }
         
+        const references = extractReferences(code, filePath);
         const highlightedCode = highlightCode(code);
         let finalCode = addLineNumbers(highlightedCode);
         
@@ -251,14 +268,15 @@ function processFile(filePath) {
         return {
             success: true,
             content: finalCode,
-            size: code.length
+            size: code.length,
+            references: references
         };
     } catch (err) {
         return null;
     }
 }
 
-// ✅ Generate complete HTML
+// ✅ Generate HTML with page number support
 function generateCompleteHTML() {
     let html = `<!DOCTYPE html>
 <html>
@@ -267,7 +285,35 @@ function generateCompleteHTML() {
 <title>Complete Project Source Code</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #f5f5f5; font-family: 'Consolas', 'Courier New', monospace; padding: 20px; }
+    body { 
+        background: #f5f5f5; 
+        font-family: 'Consolas', 'Courier New', monospace; 
+        padding: 20px;
+        margin: 0;
+        position: relative;
+    }
+    
+    /* Page break and page number styling */
+    @page {
+        margin: 20mm 15mm 25mm 15mm;
+        @bottom-center {
+            content: "Page " counter(page) " of " counter(pages);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 10px;
+            color: #666;
+        }
+    }
+    
+    /* Fallback for browsers that don't support @page counters */
+    .page-number {
+        text-align: center;
+        font-size: 10px;
+        color: #666;
+        margin-top: 20px;
+        padding-top: 10px;
+        border-top: 1px solid #ddd;
+        font-family: 'Segoe UI', Arial, sans-serif;
+    }
     
     .cover-page {
         page-break-after: always;
@@ -277,6 +323,7 @@ function generateCompleteHTML() {
         color: white;
         border-radius: 10px;
         margin-bottom: 30px;
+        position: relative;
     }
     .cover-page h1 { font-size: 48px; margin-bottom: 20px; }
     .cover-page .stats { margin-top: 60px; font-size: 18px; }
@@ -292,9 +339,31 @@ function generateCompleteHTML() {
     }
     .toc h2 { color: #333; margin-bottom: 30px; font-size: 32px; border-bottom: 3px solid #667eea; display: inline-block; padding-bottom: 10px; }
     .toc ul { list-style: none; margin-top: 30px; }
-    .toc li { margin: 15px 0; font-size: 16px; padding: 5px 0; border-bottom: 1px solid #eee; }
-    .toc a { text-decoration: none; color: #667eea; }
+    .toc li { margin: 12px 0; font-size: 14px; padding: 5px 0; border-bottom: 1px solid #eee; }
+    .toc a { text-decoration: none; color: #667eea; font-weight: 500; }
     .toc a:hover { text-decoration: underline; }
+    .toc .page-ref { color: #999; font-size: 12px; margin-left: 10px; }
+    
+    .references-section {
+        page-break-after: always;
+        padding: 40px;
+        background: white;
+        border-radius: 10px;
+        margin-bottom: 30px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .references-section h2 { color: #333; margin-bottom: 30px; font-size: 32px; border-bottom: 3px solid #667eea; display: inline-block; padding-bottom: 10px; }
+    .ref-category { margin: 20px 0; }
+    .ref-category h3 { color: #667eea; margin: 15px 0 10px 0; }
+    .ref-item { 
+        margin: 8px 0; 
+        padding: 5px 10px;
+        background: #f8f9fa;
+        border-left: 3px solid #667eea;
+        font-size: 13px;
+    }
+    .ref-name { font-weight: bold; color: #333; }
+    .ref-file { color: #666; font-size: 12px; margin-left: 10px; }
     
     .section-header {
         page-break-before: always;
@@ -316,6 +385,7 @@ function generateCompleteHTML() {
         border-radius: 8px;
         overflow: hidden;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        position: relative;
     }
     .file-header {
         background: #f8f9fa;
@@ -381,21 +451,23 @@ function generateCompleteHTML() {
     }
     
     @media print {
-        body { background: white; padding: 0; }
+        body { background: white; padding: 0; margin: 0; }
         .file-card { page-break-inside: avoid; }
         .cover-page, .section-header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .page-number { display: none; } /* Hide fallback, use @page instead */
     }
 </style>
 </head>
 <body>
 `;
     
-    const totalFiles = sectionsData.frontend.length + sectionsData.backend.length + sectionsData.config.length + sectionsData.root.length;
+    const totalFiles = sectionsData.frontend.length + sectionsData.backend.length + 
+                      sectionsData.config.length + sectionsData.root.length;
     
     html += `
 <div class="cover-page">
     <h1>📚 COMPLETE PROJECT SOURCE CODE</h1>
-    <h2>Complete Documentation</h2>
+    <h2>Complete Documentation with Page Numbers</h2>
     <div class="stats">
         <p>📊 Total Files: ${totalFiles}</p>
         <p>🎨 Frontend: ${sectionsData.frontend.length} files</p>
@@ -409,10 +481,10 @@ function generateCompleteHTML() {
 <div class="toc">
     <h2>📑 Table of Contents</h2>
     <ul>
-        <li>🎨 <strong>SECTION 1: FRONTEND</strong> - ${sectionsData.frontend.length} files</li>
-        <li>🚀 <strong>SECTION 2: BACKEND</strong> - ${sectionsData.backend.length} files</li>
-        <li>⚙️ <strong>SECTION 3: CONFIGURATION</strong> - ${sectionsData.config.length} files</li>
-        <li>📁 <strong>SECTION 4: ROOT FILES</strong> - ${sectionsData.root.length} files</li>
+        <li>🎨 <strong>Section 1: FRONTEND</strong> - ${sectionsData.frontend.length} files</li>
+        <li>🚀 <strong>Section 2: BACKEND</strong> - ${sectionsData.backend.length} files</li>
+        <li>⚙️ <strong>Section 3: CONFIGURATION</strong> - ${sectionsData.config.length} files</li>
+        <li>📁 <strong>Section 4: ROOT FILES</strong> - ${sectionsData.root.length} files</li>
     </ul>
 </div>
 `;
@@ -423,10 +495,9 @@ function generateCompleteHTML() {
 // Main execution
 async function main() {
     console.log("=" .repeat(70));
-    console.log("🚀 COMPLETE PROJECT CODE TO PDF - ENHANCED VERSION");
+    console.log("🚀 COMPLETE PROJECT CODE TO PDF WITH PAGE NUMBERS");
     console.log("=" .repeat(70));
     
-    // Check Chrome
     const chromePath = getChromePath();
     if (!chromePath) {
         console.error("\n❌ Chrome not found! Please install Google Chrome.");
@@ -435,7 +506,6 @@ async function main() {
     }
     console.log(`\n✅ Chrome found: ${chromePath}`);
     
-    // Scan directory
     console.log("\n📂 Scanning project directory...");
     console.log(`📍 Path: ${process.cwd()}\n`);
     scanDirectory("./");
@@ -446,7 +516,6 @@ async function main() {
     if (totalFiles === 0) {
         console.log("\n❌ No code files found!");
         console.log("💡 Make sure you're in the correct project directory");
-        console.log(`💡 Current directory: ${process.cwd()}`);
         process.exit(1);
     }
     
@@ -457,14 +526,13 @@ async function main() {
     console.log(`   📁 Root files: ${sectionsData.root.length}`);
     console.log(`   📦 TOTAL: ${totalFiles} files found\n`);
     
-    // Generate HTML
     console.log("🎨 Generating HTML and processing files...\n");
     const { html: initialHTML, totalFiles: total } = generateCompleteHTML();
     let finalHTML = initialHTML;
     let processedCount = 0;
     let totalCodeSize = 0;
+    let allReferences = [];
     
-    // Process each section
     for (const section of SECTIONS) {
         const files = sectionsData[section.name];
         if (files.length === 0) continue;
@@ -489,14 +557,27 @@ async function main() {
             
             if (result && result.success) {
                 const relativePath = path.relative(process.cwd(), filePath);
+                
+                // Add anchor for reference linking
+                const anchorId = `file-${processedCount}`;
                 finalHTML += `
-<div class="file-card">
+<div class="file-card" id="${anchorId}">
     <div class="file-header">
         <h2>${escapeHtml(relativePath)}</h2>
     </div>
     ${result.content}
+    <div class="page-number"></div>
 </div>
 `;
+                // Store references with anchor ID
+                result.references.forEach(ref => {
+                    allReferences.push({
+                        ...ref,
+                        anchorId: anchorId,
+                        fullPath: relativePath
+                    });
+                });
+                
                 processedCount++;
                 totalCodeSize += result.size;
                 console.log(`✅ (${(result.size/1024).toFixed(1)} KB)`);
@@ -508,12 +589,64 @@ async function main() {
         console.log();
     }
     
+    // Add references section before footer
+    if (allReferences.length > 0) {
+        finalHTML += `
+<div class="references-section">
+    <h2>📚 Code References Index</h2>
+    <p style="margin-bottom: 20px; color: #666;">Quick navigation to functions, classes, and exports</p>
+`;
+        
+        // Group by type
+        const functions = allReferences.filter(r => r.type === 'function');
+        const classes = allReferences.filter(r => r.type === 'class');
+        const exports = allReferences.filter(r => r.type === 'export');
+        
+        if (functions.length > 0) {
+            finalHTML += `<div class="ref-category">
+                <h3>🔧 Functions (${functions.length})</h3>`;
+            functions.forEach(ref => {
+                finalHTML += `<div class="ref-item">
+                    <span class="ref-name">${escapeHtml(ref.name)}</span>
+                    <span class="ref-file">📄 ${escapeHtml(ref.file)}</span>
+                </div>`;
+            });
+            finalHTML += `</div>`;
+        }
+        
+        if (classes.length > 0) {
+            finalHTML += `<div class="ref-category">
+                <h3>🏗️ Classes (${classes.length})</h3>`;
+            classes.forEach(ref => {
+                finalHTML += `<div class="ref-item">
+                    <span class="ref-name">${escapeHtml(ref.name)}</span>
+                    <span class="ref-file">📄 ${escapeHtml(ref.file)}</span>
+                </div>`;
+            });
+            finalHTML += `</div>`;
+        }
+        
+        if (exports.length > 0) {
+            finalHTML += `<div class="ref-category">
+                <h3>📤 Exports (${exports.length})</h3>`;
+            exports.forEach(ref => {
+                finalHTML += `<div class="ref-item">
+                    <span class="ref-name">${escapeHtml(ref.name)}</span>
+                    <span class="ref-file">📄 ${escapeHtml(ref.file)}</span>
+                </div>`;
+            });
+            finalHTML += `</div>`;
+        }
+        
+        finalHTML += `</div>`;
+    }
+    
     finalHTML += `
 <div class="footer">
     <p><strong>📊 Total Files Processed: ${processedCount}/${totalFiles}</strong></p>
     <p>📦 Total Code Size: ${(totalCodeSize/1024/1024).toFixed(2)} MB</p>
+    <p>📝 Page numbers appear at the bottom center of each page</p>
     <p>🔧 Generated on: ${new Date().toLocaleString()}</p>
-    <p>📝 Complete Project Source Code Documentation</p>
 </div>
 </body>
 </html>`;
@@ -522,8 +655,7 @@ async function main() {
     console.log(`\n✅ HTML generated! Processed ${processedCount} files`);
     console.log(`📦 HTML size: ${(Buffer.byteLength(finalHTML, 'utf8') / 1024 / 1024).toFixed(2)} MB`);
     
-    // Generate PDF
-    console.log("\n🚀 Generating PDF... (this may take a moment)");
+    console.log("\n🚀 Generating PDF with page numbers... (this may take a moment)");
     
     let browser = null;
     try {
@@ -538,12 +670,15 @@ async function main() {
         await page.setViewport({ width: 1200, height: 800 });
         await page.setContent(finalHTML, { waitUntil: 'networkidle0', timeout: CONFIG.timeout });
         
-        const outputFile = "COMPLETE_PROJECT_CODE.pdf";
+        const outputFile = "COMPLETE_PROJECT_CODE_WITH_PAGES.pdf";
         await page.pdf({ 
             path: outputFile, 
             format: "A4", 
-            printBackground: true, 
-            margin: { top: "15mm", bottom: "15mm", left: "12mm", right: "12mm" } 
+            printBackground: true,
+            displayHeaderFooter: true,
+            headerTemplate: '<div></div>',
+            footerTemplate: '<div style="font-size: 10px; text-align: center; width: 100%; color: #666; font-family: Arial, sans-serif;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+            margin: { top: "20mm", bottom: "25mm", left: "15mm", right: "15mm" }
         });
         
         await browser.close();
@@ -555,6 +690,8 @@ async function main() {
         console.log(`📦 PDF Size: ${(pdfStats.size / 1024 / 1024).toFixed(2)} MB`);
         console.log(`\n📊 Final Statistics:`);
         console.log(`   ✅ Successfully processed: ${processedCount} files`);
+        console.log(`   📝 Code references found: ${allReferences.length} (functions, classes, exports)`);
+        console.log(`   📄 Page numbers added at bottom center of each page`);
         console.log(`   ❌ Failed/Skipped: ${processedStats.failed} files`);
         console.log(`   📦 Total code size: ${(totalCodeSize/1024/1024).toFixed(2)} MB`);
         
@@ -564,7 +701,6 @@ async function main() {
     }
 }
 
-// Run the script
 if (global.gc) {
     console.log("✅ Garbage collection enabled\n");
 } else {
